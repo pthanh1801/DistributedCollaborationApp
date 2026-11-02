@@ -88,6 +88,24 @@ class CollaborationClient:
         threading.Thread(target=self.heartbeat_loop, daemon=True).start()
         threading.Thread(target=self.tcp_ping_loop, daemon=True).start()
 
+    def close(self):
+        """Đóng an toàn tất cả socket và luồng của client."""
+        self.stop_event.set()
+        if self.tcp_file:
+            try:
+                self.tcp_file.close()
+            except OSError:
+                pass
+        if self.tcp:
+            try:
+                self.tcp.close()
+            except OSError:
+                pass
+        try:
+            self.udp.close()
+        except OSError:
+            pass
+
     def next_seq(self):
         with self.seq_lock:
             value = self.seq
@@ -547,7 +565,8 @@ class UIHandler(BaseHTTPRequestHandler):
     """Phục vụ trang UI và các API cục bộ cho client Python."""
 
     client_app = None
-    index_file = Path(__file__).with_name("static") / "index.html"
+    static_dir = Path(__file__).with_name("static")
+    index_file = static_dir / "index.html"
 
     def reply(self, code, data, ctype="application/json"):
         body = data if isinstance(data, bytes) else data.encode()
@@ -570,10 +589,23 @@ class UIHandler(BaseHTTPRequestHandler):
         return body
 
     def do_GET(self):
-        """Trả giao diện chính hoặc state hiện tại của client."""
-        if self.path == "/":
+        """Trả giao diện chính, tài nguyên tĩnh hoặc state hiện tại của client."""
+        clean_path = self.path.split("?")[0]
+        if clean_path in ("/", "/index.html", "/static/index.html"):
             self.reply(200, self.index_file.read_bytes(), "text/html; charset=utf-8")
-        elif self.path == "/api/state":
+        elif clean_path in ("/style.css", "/static/style.css"):
+            css_path = self.static_dir / "style.css"
+            if css_path.exists():
+                self.reply(200, css_path.read_bytes(), "text/css; charset=utf-8")
+            else:
+                self.reply(404, b"Not Found", "text/plain")
+        elif clean_path in ("/app.js", "/static/app.js"):
+            js_path = self.static_dir / "app.js"
+            if js_path.exists():
+                self.reply(200, js_path.read_bytes(), "application/javascript; charset=utf-8")
+            else:
+                self.reply(404, b"Not Found", "text/plain")
+        elif clean_path == "/api/state":
             self.reply(200, json.dumps(self.client_app.state()))
         else:
             self.reply(404, "{}")
@@ -582,10 +614,11 @@ class UIHandler(BaseHTTPRequestHandler):
         """Xử lý API gửi tin nhắn và yêu cầu gửi tệp."""
         try:
             body = self.read_json()
-            if self.path == "/api/send":
+            clean_path = self.path.split("?")[0]
+            if clean_path == "/api/send":
                 self.client_app.send_message(body.get("to", "*"), body.get("text", ""))
                 self.reply(200, '{"ok":true}')
-            elif self.path == "/api/file":
+            elif clean_path == "/api/file":
                 encoded = body.get("data")
                 name = body.get("name")
                 target = body.get("to", "*")
@@ -618,6 +651,7 @@ class UIHandler(BaseHTTPRequestHandler):
         except (OSError, TimeoutError) as exc:
             logger.warning("Request failed because of a network error: %s", exc)
             self.reply(503, json.dumps({"ok": False, "error": "network unavailable"}))
+
     def log_message(self, format, *args):
         logger.info("HTTP " + format, *args)
 
