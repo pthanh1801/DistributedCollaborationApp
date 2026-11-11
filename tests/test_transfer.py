@@ -230,3 +230,70 @@ def test_send_window_slides_when_an_earlier_packet_is_acked(monkeypatch):
 
     assert third_sent_before_second_ack == [True]
     assert sent_sequences[:3] == [1, 2, 3]
+
+
+def test_prepare_and_send_file_records_room_metadata_and_progress(monkeypatch):
+    client = make_client()
+    client.username = "alice"
+    client.seq = 1
+    client.seq_lock = threading.Lock()
+    observed_progress = []
+
+    def fake_send_window(batch):
+        observed_progress.append(client.transfers[0]["progress"])
+
+    monkeypatch.setattr(client, "send_window", fake_send_window)
+
+    data = b"x" * (CHUNK_SIZE * WINDOW_SIZE * 2 + 10)
+    transfer = client.prepare_file_transfer("bob", "report.pdf", data)
+
+    record = client.transfers[0]
+    assert record["file_id"] == transfer["file_id"]
+    assert record["from"] == "alice"
+    assert record["to"] == "bob"
+    assert record["peer"] == "bob"
+    assert record["size"] == len(data)
+    assert record["progress"] == 0
+    assert record["status"] == "sending"
+
+    client._send_prepared_file(transfer)
+
+    assert len(observed_progress) >= 3
+    assert observed_progress[0] == 0
+    assert any(0 < p < 100 for p in observed_progress)
+    assert record["progress"] == 100
+    assert record["status"] == "sent to server"
+
+
+def test_handle_file_meta_preserves_target_for_room_filtering():
+    client = make_client()
+    client.username = "bob"
+
+    broadcast_id = uuid.uuid4()
+    private_id = uuid.uuid4()
+    data = b"hello"
+    digest = hashlib.sha256(data).hexdigest()
+
+    client.handle_file_meta(Packet(FILE_META, 1, broadcast_id), {
+        "file_id": broadcast_id.hex,
+        "name": "public.txt",
+        "size": len(data),
+        "sha256": digest,
+        "total": 1,
+        "from": "alice",
+        "to": "*",
+    })
+    client.handle_file_meta(Packet(FILE_META, 2, private_id), {
+        "file_id": private_id.hex,
+        "name": "secret.txt",
+        "size": len(data),
+        "sha256": digest,
+        "total": 1,
+        "from": "alice",
+        "to": "bob",
+    })
+
+    assert client.transfers[0]["from"] == "alice"
+    assert client.transfers[0]["to"] == "*"
+    assert client.transfers[1]["from"] == "alice"
+    assert client.transfers[1]["to"] == "bob"

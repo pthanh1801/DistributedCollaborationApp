@@ -60,7 +60,7 @@
     </section>
 
     <!-- CHAT MAIN PANEL -->
-    <section class="panel panel-chat">
+    <section id="panel-chat" class="panel panel-chat">
       <div class="chat-active-bar">
         <div class="chat-recipient-info">
           <div id="chat-target-avatar" class="user-avatar broadcast-avatar"
@@ -72,20 +72,65 @@
             <span id="chat-target-type" class="chat-recipient-tag">Phòng chat chung</span>
           </div>
         </div>
-        <div>
+        <div class="chat-header-meta">
+          <span class="badge-count">Truyền tệp UDP ≤ 50 MB</span>
           <select id="target" style="display:none;">
             <option value="*">Everyone</option>
           </select>
         </div>
       </div>
 
+      <div id="chat-drop-overlay" class="chat-drop-overlay">
+        <div class="drop-overlay-card">
+          <svg width="32" height="32" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
+            <polyline points="17 8 12 3 7 8"></polyline>
+            <line x1="12" y1="2" x2="12" y2="15"></line>
+          </svg>
+          <div id="drop-overlay-text" class="drop-overlay-title">Thả tệp vào đây để gửi</div>
+          <div class="drop-overlay-sub">Cắt chunk 900B, xác thực SHA-256</div>
+        </div>
+      </div>
+
       <div id="messages" class="messages-container">
-        <!-- Messages rendered by app.js -->
+        <!-- Messages & File transfers rendered by app.js -->
+      </div>
+
+      <div id="selected-file-box" class="selected-file-bar">
+        <div class="selected-file-meta">
+          <div class="selected-file-icon">
+            <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
+              <polyline points="13 2 13 9 20 9"></polyline>
+            </svg>
+          </div>
+          <div class="selected-file-text">
+            <div id="selected-file-name" class="selected-file-name"></div>
+            <div id="selected-file-size" class="selected-file-size"></div>
+          </div>
+        </div>
+        <div class="selected-file-actions">
+          <button type="button" class="btn-upload-inline" onclick="sendFile()">
+            <svg width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <line x1="12" y1="19" x2="12" y2="5"></line>
+              <polyline points="5 12 12 5 19 12"></polyline>
+            </svg>
+            Gửi tệp
+          </button>
+          <button type="button" class="btn-cancel-file" onclick="clearSelectedFile()" title="Bỏ chọn tệp">&times;</button>
+        </div>
       </div>
 
       <div class="chat-input-bar">
+        <label class="btn-attach" for="file" title="Chọn tệp gửi qua UDP (≤ 50 MB)">
+          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48"></path>
+          </svg>
+          <span>Gửi tệp</span>
+          <input id="file" type="file" style="display:none;" onchange="handleFileSelect(this)">
+        </label>
         <div class="input-wrapper">
-          <input id="text" class="chat-input" type="text" placeholder="Nhập tin nhắn... (nhấn Enter để gửi)"
+          <input id="text" class="chat-input" type="text" placeholder="Nhập tin nhắn hoặc kéo thả tệp vào khung chat... (Enter để gửi)"
             autocomplete="off">
         </div>
         <button class="btn-send" onclick="sendMessage()">
@@ -95,52 +140,6 @@
             <polygon points="22 2 15 22 11 13 2 9 22 2"></polygon>
           </svg>
         </button>
-      </div>
-    </section>
-
-    <!-- FILE TRANSFER PANEL -->
-    <section class="panel panel-files">
-      <div class="panel-header">
-        <div class="panel-title">
-          <svg width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-            <path d="M13 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V9z"></path>
-            <polyline points="13 2 13 9 20 9"></polyline>
-          </svg>
-          Truyền tệp UDP
-        </div>
-        <span class="badge-count">≤ 50 MB</span>
-      </div>
-
-      <div class="file-upload-box">
-        <label class="dropzone" for="file">
-          <div class="dropzone-icon">
-            <svg width="20" height="20" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-              <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-              <polyline points="17 8 12 3 7 8"></polyline>
-              <line x1="12" y1="2" x2="12" y2="15"></line>
-            </svg>
-          </div>
-          <div class="dropzone-title">Chọn tệp gửi qua UDP</div>
-          <div class="dropzone-sub">Cắt chunk 900B, xác thực SHA-256</div>
-          <input id="file" type="file" style="display:none;" onchange="handleFileSelect(this)">
-        </label>
-
-        <div id="selected-file-box" class="selected-file-info">
-          <span id="selected-file-name" style="overflow:hidden; text-overflow:ellipsis;"></span>
-          <span id="selected-file-size" style="color:var(--text-muted); font-size:0.75rem;"></span>
-        </div>
-
-        <button class="btn-upload" onclick="sendFile()">
-          <svg width="15" height="15" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-            <line x1="12" y1="19" x2="12" y2="5"></line>
-            <polyline points="5 12 12 5 19 12"></polyline>
-          </svg>
-          Bắt đầu truyền tệp
-        </button>
-      </div>
-
-      <div id="transfers" class="transfers-list">
-        <!-- File transfers rendered by app.js -->
       </div>
     </section>
   </main>

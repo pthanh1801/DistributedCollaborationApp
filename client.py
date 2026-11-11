@@ -246,11 +246,12 @@ class CollaborationClient:
                 "to": target,
                 "text": text,
                 "time": time.strftime("%H:%M:%S"),
+                "timestamp": time.time(),
             })
             del self.messages[:-500]
 
-    def send_file_bytes(self, target, name, data):
-        """Tạo metadata/checksum, chia file thành chunk rồi gửi có ACK."""
+    def prepare_file_transfer(self, target, name, data):
+        """Kiểm tra tệp, tạo metadata/checksum và đăng ký bản ghi tiến trình."""
         if not isinstance(target, str) or not target:
             raise ValueError("recipient must be provided")
         if not isinstance(name, str):
@@ -274,14 +275,37 @@ class CollaborationClient:
         record = {
             "direction": "send",
             "name": safe_name,
+            "size": len(data),
             "peer": target,
+            "from": getattr(self, "username", "?"),
+            "to": target,
             "status": "sending",
             "progress": 0,
             "file_id": file_id,
+            "time": time.strftime("%H:%M:%S"),
+            "timestamp": time.time(),
         }
         with self.state_lock:
             self.transfers.append(record)
             del self.transfers[:-200]
+
+        return {
+            "file_uuid": file_uuid,
+            "file_id": file_id,
+            "target": target,
+            "name": safe_name,
+            "size": len(data),
+            "sha256": digest,
+            "chunks": chunks,
+            "total": total,
+            "record": record,
+        }
+
+    def _send_prepared_file(self, transfer):
+        """Thực hiện truyền metadata và từng cửa sổ chunk qua UDP."""
+        record = transfer["record"]
+        file_uuid = transfer["file_uuid"]
+        total = transfer["total"]
 
         try:
             meta = Packet(
@@ -289,11 +313,11 @@ class CollaborationClient:
                 self.next_seq(),
                 file_uuid,
                 payload=json_bytes({
-                    "to": target,
-                    "file_id": file_id,
-                    "name": safe_name,
-                    "size": len(data),
-                    "sha256": digest,
+                    "to": transfer["target"],
+                    "file_id": transfer["file_id"],
+                    "name": transfer["name"],
+                    "size": transfer["size"],
+                    "sha256": transfer["sha256"],
                     "total": total,
                 }),
             )
@@ -309,7 +333,7 @@ class CollaborationClient:
                     flags=FLAG_END if idx == total - 1 else 0,
                     payload=chunk,
                 )
-                for idx, chunk in enumerate(chunks)
+                for idx, chunk in enumerate(transfer["chunks"])
             ]
             for start in range(0, len(packets), WINDOW_SIZE):
                 batch = packets[start:start + WINDOW_SIZE]
@@ -323,12 +347,17 @@ class CollaborationClient:
             with self.state_lock:
                 record["status"] = "failed"
                 record["error"] = str(exc)
-            logger.exception("File transfer of %s failed", safe_name)
+            logger.exception("File transfer of %s failed", transfer["name"])
             return
 
         with self.state_lock:
             record["progress"] = 100
             record["status"] = "sent to server"
+
+    def send_file_bytes(self, target, name, data):
+        """Tạo metadata/checksum, chia file thành chunk rồi gửi có ACK."""
+        transfer = self.prepare_file_transfer(target, name, data)
+        self._send_prepared_file(transfer)
 
     def handle_file_meta(self, packet, body):
         """Kiểm tra metadata và khởi tạo trạng thái nhận file."""
@@ -357,6 +386,12 @@ class CollaborationClient:
         safe_name = Path(name.replace("\\", "/")).name
         if not safe_name or safe_name in (".", ".."):
             raise ValueError("invalid file name")
+        sender = body.get("from", "?")
+        target = body.get("to", "*")
+        if not isinstance(sender, str) or not sender:
+            sender = "?"
+        if not isinstance(target, str) or not target:
+            target = "*"
         with self.state_lock:
             if fid in self.incoming:
                 return
@@ -365,17 +400,23 @@ class CollaborationClient:
                 "size": size,
                 "sha256": digest,
                 "total": total,
-                "from": body.get("from", "?"),
+                "from": sender,
+                "to": target,
                 "chunks": {},
                 "last_activity": time.monotonic(),
             }
             self.transfers.append({
                 "direction": "receive",
                 "name": safe_name,
-                "peer": body.get("from", "?"),
+                "size": size,
+                "peer": sender,
+                "from": sender,
+                "to": target,
                 "status": "receiving",
                 "progress": 0,
                 "file_id": fid,
+                "time": time.strftime("%H:%M:%S"),
+                "timestamp": time.time(),
             })
             del self.transfers[:-200]
 
@@ -489,6 +530,7 @@ class CollaborationClient:
                             "to": body.get("to", "*"),
                             "text": text,
                             "time": time.strftime("%H:%M:%S"),
+                            "timestamp": time.time(),
                         })
                         del self.messages[:-500]
                 elif packet.ptype == FILE_META:
@@ -629,12 +671,13 @@ class UIHandler(BaseHTTPRequestHandler):
                 data = base64.b64decode(encoded, validate=True)
                 if len(data) > MAX_FILE_SIZE:
                     raise OverflowError("file exceeds the maximum size")
+                transfer = self.client_app.prepare_file_transfer(target, name, data)
                 threading.Thread(
-                    target=self.client_app.send_file_bytes,
-                    args=(target, name, data),
+                    target=self.client_app._send_prepared_file,
+                    args=(transfer,),
                     daemon=True,
                 ).start()
-                self.reply(200, '{"ok":true}')
+                self.reply(200, json.dumps({"ok": True, "file_id": transfer["file_id"]}))
             else:
                 self.reply(404, "{}")
         except OverflowError as exc:
