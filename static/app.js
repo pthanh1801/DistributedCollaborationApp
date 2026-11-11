@@ -9,10 +9,26 @@ let pollTimer = null;
 let dragDepth = 0;
 
 const msgContainer = document.getElementById('messages');
+const scrollBottomBtn = document.getElementById('scroll-bottom-btn');
+
+function updateScrollBottomButton() {
+  if (!msgContainer || !scrollBottomBtn) return;
+  const hasOverflow = msgContainer.scrollHeight > msgContainer.clientHeight + 20;
+  scrollBottomBtn.style.display = hasOverflow && userScrolledUp ? 'inline-flex' : 'none';
+}
+
+function scrollToBottom() {
+  if (!msgContainer) return;
+  userScrolledUp = false;
+  msgContainer.scrollTo({ top: msgContainer.scrollHeight, behavior: 'smooth' });
+  updateScrollBottomButton();
+}
+
 if (msgContainer) {
   msgContainer.addEventListener('scroll', () => {
     const isNearBottom = msgContainer.scrollHeight - msgContainer.scrollTop - msgContainer.clientHeight < 60;
     userScrolledUp = !isNearBottom;
+    updateScrollBottomButton();
   });
 }
 
@@ -453,6 +469,7 @@ function renderState(s) {
       if (!userScrolledUp) {
         msgContainer.scrollTop = msgContainer.scrollHeight;
       }
+      updateScrollBottomButton();
     } else {
       // Update progress bars in-place so CSS width transitions stay smooth
       roomTransfers.forEach(item => {
