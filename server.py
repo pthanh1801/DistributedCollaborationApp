@@ -464,16 +464,27 @@ class CollaborationServer:
                 return
 
     def send_user_list(self, addr):
-        """Gửi danh sách username hiện đang được server ghi nhận online."""
+        """Gửi danh sách username online và toàn bộ tài khoản hệ thống."""
         with self.users_lock:
             names = sorted(self.users.keys())
+        all_names = sorted(self.credentials.keys())
         packet = Packet(
             USER_LIST,
             self.next_seq(),
             new_id(),
-            payload=json_bytes({"users": names}),
+            payload=json_bytes({"users": names, "all_users": all_names}),
         )
-        self.udp.sendto(encode_packet(packet), addr)
+        try:
+            raw = encode_packet(packet)
+        except ValueError:
+            packet = Packet(
+                USER_LIST,
+                self.next_seq(),
+                new_id(),
+                payload=json_bytes({"users": names}),
+            )
+            raw = encode_packet(packet)
+        self.udp.sendto(raw, addr)
 
     def broadcast_user_list(self):
         """Cập nhật danh sách online cho tất cả client đang đăng nhập."""

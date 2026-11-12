@@ -38,6 +38,7 @@ class CollaborationClient:
         self.username = username
         self.server_addr = (socket.gethostbyname(server_host), UDP_PORT)
         self.users = []
+        self.all_users = []
         self.messages = []
         self.transfers = []
         self.incoming = {}
@@ -511,12 +512,20 @@ class CollaborationClient:
                 if packet.ptype == USER_LIST:
                     body = json_obj(packet.payload)
                     users = body.get("users")
+                    all_users = body.get("all_users")
                     if not isinstance(users, list) or not all(
                         isinstance(user, str) for user in users
                     ):
                         raise ValueError("invalid user list")
+                    if all_users is not None and (
+                        not isinstance(all_users, list)
+                        or not all(isinstance(user, str) for user in all_users)
+                    ):
+                        raise ValueError("invalid all_users list")
                     with self.state_lock:
                         self.users = users
+                        if all_users is not None:
+                            self.all_users = all_users
                 elif packet.ptype == MSG:
                     if not packet.flags & FLAG_END:
                         raise ValueError("message packet is missing end flag")
@@ -594,21 +603,26 @@ class CollaborationClient:
     def state(self):
         """Trả bản sao an toàn của state cho HTTP UI đọc."""
         with self.state_lock:
+            all_users = sorted(set(getattr(self, "all_users", [])) | set(self.users))
             return copy.deepcopy({
                 "username": self.username,
                 "connection": "disconnected" if self.stop_event.is_set() else "connected",
                 "users": self.users,
+                "all_users": all_users,
                 "messages": self.messages[-100:],
                 "transfers": self.transfers[-50:],
             })
 
 
 class UIHandler(BaseHTTPRequestHandler):
-    """Phục vụ trang UI và các API cục bộ cho client Python."""
+    """Phục vụ trang UI, đăng nhập và các API cục bộ cho client Python."""
 
     client_app = None
+    default_server = SERVER_HOST
+    app_lock = threading.Lock()
     static_dir = Path(__file__).with_name("static")
     index_file = static_dir / "index.html"
+    login_file = static_dir / "login.html"
 
     def reply(self, code, data, ctype="application/json"):
         body = data if isinstance(data, bytes) else data.encode()
@@ -617,6 +631,12 @@ class UIHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(body)))
         self.end_headers()
         self.wfile.write(body)
+
+    def redirect(self, location):
+        self.send_response(302)
+        self.send_header("Location", location)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
 
     def read_json(self):
         """Đọc JSON request có giới hạn kích thước và yêu cầu object."""
@@ -631,10 +651,23 @@ class UIHandler(BaseHTTPRequestHandler):
         return body
 
     def do_GET(self):
-        """Trả giao diện chính, tài nguyên tĩnh hoặc state hiện tại của client."""
+        """Trả trang đăng nhập, giao diện chính, tài nguyên tĩnh hoặc state client."""
         clean_path = self.path.split("?")[0]
+        with UIHandler.app_lock:
+            app = UIHandler.client_app
+
         if clean_path in ("/", "/index.html", "/static/index.html"):
-            self.reply(200, self.index_file.read_bytes(), "text/html; charset=utf-8")
+            if app is None:
+                self.redirect("/login")
+            else:
+                self.reply(200, self.index_file.read_bytes(), "text/html; charset=utf-8")
+        elif clean_path in ("/login", "/login.html", "/static/login.html"):
+            if app is not None:
+                self.redirect("/")
+            elif self.login_file.exists():
+                self.reply(200, self.login_file.read_bytes(), "text/html; charset=utf-8")
+            else:
+                self.reply(404, b"Not Found", "text/plain")
         elif clean_path in ("/style.css", "/static/style.css"):
             css_path = self.static_dir / "style.css"
             if css_path.exists():
@@ -647,18 +680,75 @@ class UIHandler(BaseHTTPRequestHandler):
                 self.reply(200, js_path.read_bytes(), "application/javascript; charset=utf-8")
             else:
                 self.reply(404, b"Not Found", "text/plain")
+        elif clean_path == "/api/auth":
+            self.reply(200, json.dumps({
+                "authenticated": app is not None,
+                "username": app.username if app is not None else None,
+                "default_server": UIHandler.default_server,
+            }))
         elif clean_path == "/api/state":
-            self.reply(200, json.dumps(self.client_app.state()))
+            if app is None:
+                self.reply(401, json.dumps({"authenticated": False, "error": "not authenticated"}))
+                return
+            self.reply(200, json.dumps(app.state()))
         else:
             self.reply(404, "{}")
 
     def do_POST(self):
-        """Xử lý API gửi tin nhắn và yêu cầu gửi tệp."""
+        """Xử lý API đăng nhập/đăng xuất, gửi tin nhắn và yêu cầu gửi tệp."""
         try:
             body = self.read_json()
             clean_path = self.path.split("?")[0]
+            if clean_path == "/api/login":
+                username = body.get("username")
+                password = body.get("password")
+                server_host = body.get("server") or UIHandler.default_server
+                if not isinstance(username, str) or not username.strip():
+                    raise ValueError("Vui lòng nhập tên tài khoản.")
+                if not isinstance(password, str) or not password:
+                    raise ValueError("Vui lòng nhập mật khẩu.")
+                if not isinstance(server_host, str) or not server_host.strip():
+                    raise ValueError("Địa chỉ máy chủ không hợp lệ.")
+                username = username.strip()
+                server_host = server_host.strip()
+                with UIHandler.app_lock:
+                    old_app = UIHandler.client_app
+                    if old_app is not None:
+                        old_app.close()
+                        UIHandler.client_app = None
+                    try:
+                        new_app = CollaborationClient(username, password, server_host)
+                    except RuntimeError as exc:
+                        if "authentication failed" in str(exc):
+                            self.reply(401, json.dumps({
+                                "ok": False,
+                                "error": "Sai tài khoản, mật khẩu hoặc tài khoản đang được sử dụng.",
+                            }))
+                            return
+                        raise
+                    UIHandler.client_app = new_app
+                self.reply(200, json.dumps({"ok": True, "username": new_app.username}))
+                return
+            if clean_path == "/api/logout":
+                with UIHandler.app_lock:
+                    old_app = UIHandler.client_app
+                    UIHandler.client_app = None
+                if old_app is not None:
+                    old_app.close()
+                self.reply(200, '{"ok":true}')
+                return
+
+            with UIHandler.app_lock:
+                app = UIHandler.client_app
+            if app is None:
+                self.reply(401, json.dumps({
+                    "ok": False,
+                    "error": "Phiên đăng nhập đã hết hạn, vui lòng đăng nhập lại.",
+                }))
+                return
+
             if clean_path == "/api/send":
-                self.client_app.send_message(body.get("to", "*"), body.get("text", ""))
+                app.send_message(body.get("to", "*"), body.get("text", ""))
                 self.reply(200, '{"ok":true}')
             elif clean_path == "/api/file":
                 encoded = body.get("data")
@@ -671,9 +761,9 @@ class UIHandler(BaseHTTPRequestHandler):
                 data = base64.b64decode(encoded, validate=True)
                 if len(data) > MAX_FILE_SIZE:
                     raise OverflowError("file exceeds the maximum size")
-                transfer = self.client_app.prepare_file_transfer(target, name, data)
+                transfer = app.prepare_file_transfer(target, name, data)
                 threading.Thread(
-                    target=self.client_app._send_prepared_file,
+                    target=app._send_prepared_file,
                     args=(transfer,),
                     daemon=True,
                 ).start()
@@ -691,35 +781,44 @@ class UIHandler(BaseHTTPRequestHandler):
             UnicodeDecodeError,
         ) as exc:
             self.reply(400, json.dumps({"ok": False, "error": str(exc)}))
-        except (OSError, TimeoutError) as exc:
+        except (OSError, TimeoutError, RuntimeError) as exc:
             logger.warning("Request failed because of a network error: %s", exc)
-            self.reply(503, json.dumps({"ok": False, "error": "network unavailable"}))
+            self.reply(503, json.dumps({
+                "ok": False,
+                "error": "Không thể kết nối tới máy chủ. Vui lòng kiểm tra server và thử lại.",
+            }))
 
     def log_message(self, format, *args):
         logger.info("HTTP " + format, *args)
 
 
 def main():
-    """Đọc tham số, khởi tạo client và chạy HTTP UI cục bộ."""
+    """Đọc tham số, khởi tạo HTTP UI cục bộ và kết nối client nếu có sẵn thông tin."""
     parser = argparse.ArgumentParser()
-    parser.add_argument("--username", required=True)
-    parser.add_argument("--password", required=True)
+    parser.add_argument("--username", default=None)
+    parser.add_argument("--password", default=None)
     parser.add_argument("--server", default=SERVER_HOST)
     parser.add_argument("--ui-port", type=int, default=8000)
     args = parser.parse_args()
 
+    if bool(args.username) != bool(args.password):
+        parser.error("--username and --password must be provided together")
+
     logging.basicConfig(level=logging.INFO)
     ui = ThreadingHTTPServer(("127.0.0.1", args.ui_port), UIHandler)
     ui.daemon_threads = True
-    app = None
+    UIHandler.default_server = args.server
 
     try:
-        app = CollaborationClient(args.username, args.password, args.server)
-        UIHandler.client_app = app
-
         url = f"http://127.0.0.1:{args.ui_port}"
-        print(f"Logged in as {args.username}")
-        print(f"UDP port     : {app.udp_port}")
+        if args.username and args.password:
+            app = CollaborationClient(args.username, args.password, args.server)
+            with UIHandler.app_lock:
+                UIHandler.client_app = app
+            print(f"Logged in as {args.username}")
+            print(f"UDP port     : {app.udp_port}")
+        else:
+            print("Waiting for login via Web UI")
         print(f"Web UI       : {url}")
         threading.Timer(0.5, lambda: webbrowser.open(url)).start()
         ui.serve_forever()
@@ -727,12 +826,11 @@ def main():
         pass
     finally:
         ui.server_close()
-        UIHandler.client_app = None
-        if app is not None:
-            app.stop_event.set()
-            app.tcp_file.close()
-            app.tcp.close()
-            app.udp.close()
+        with UIHandler.app_lock:
+            active_app = UIHandler.client_app
+            UIHandler.client_app = None
+        if active_app is not None:
+            active_app.close()
 
 
 if __name__ == "__main__":

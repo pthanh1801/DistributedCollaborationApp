@@ -162,9 +162,25 @@ function selectTarget(target) {
 
 async function api(path, options) {
   const r = await fetch(path, options);
+  if (r.status === 401) {
+    window.location.href = '/login';
+    throw new Error('Phiên đăng nhập đã hết hạn');
+  }
   const result = await r.json();
   if (!r.ok) throw new Error(result.error || 'Yêu cầu không thành công');
   return result;
+}
+
+async function logout() {
+  if (pollTimer) {
+    clearTimeout(pollTimer);
+    pollTimer = null;
+  }
+  try {
+    await fetch('/api/logout', { method: 'POST', body: '{}' });
+  } catch (_) {
+  }
+  window.location.href = '/login';
 }
 
 function showNotice(text, isSuccess = false) {
@@ -344,10 +360,32 @@ function renderState(s) {
   const allMessages = s.messages || [];
   const allTransfers = [...(s.transfers || []), ...pendingUploads];
 
-  // Active Users list
-  const otherUsers = (s.users || []).filter(x => x !== s.username);
+  // All system users split into Online (top, green & bold) and Offline (bottom, dimmed)
+  const onlineSet = new Set(s.users || []);
+  const allKnownUsers = (s.all_users && s.all_users.length > 0)
+    ? Array.from(new Set([...s.all_users, ...(s.users || [])]))
+    : Array.from(onlineSet);
+  const onlineOthers = allKnownUsers
+    .filter(x => x !== s.username && onlineSet.has(x))
+    .sort((a, b) => a.localeCompare(b));
+  const offlineOthers = allKnownUsers
+    .filter(x => x !== s.username && !onlineSet.has(x))
+    .sort((a, b) => a.localeCompare(b));
+
   const userCount = document.getElementById('user-count');
-  if (userCount) userCount.textContent = (s.users ? s.users.length : 0) + ' online';
+  if (userCount) {
+    userCount.textContent = `${onlineSet.size}/${allKnownUsers.length} online`;
+  }
+
+  // Keep chat header status tag in sync if viewing a private user
+  if (currentTarget !== '*') {
+    const typeTag = document.getElementById('chat-target-type');
+    if (typeTag) {
+      typeTag.textContent = onlineSet.has(currentTarget)
+        ? 'Tin nhắn riêng (Unicast) · Đang online'
+        : 'Tin nhắn riêng (Unicast) · Đang offline';
+    }
+  }
 
   const broadcastMsgs = allMessages.filter(m => belongsToRoom(m, '*', s.username)).length;
   const broadcastFiles = allTransfers.filter(t => belongsToRoom(t, '*', s.username));
@@ -368,28 +406,42 @@ function renderState(s) {
     </div>
   `;
 
-  otherUsers.forEach(u => {
+  function renderMemberItem(u, isOnline) {
     const isSelected = currentTarget === u;
     const directMsgs = allMessages.filter(m => belongsToRoom(m, u, s.username)).length;
     const directFiles = allTransfers.filter(t => belongsToRoom(t, u, s.username));
     const activeTransfer = directFiles.find(t =>
       t.status === 'sending' || t.status === 'receiving' || t.status === 'preparing'
     );
+    const metaText = formatRoomMeta(directMsgs, directFiles.length, isOnline ? 'Online' : 'Offline');
 
-    userHtml += `
-      <div class="user-item ${isSelected ? 'active' : ''}" onclick="selectTarget('${escapeHtml(u)}')">
+    return `
+      <div class="user-item ${isOnline ? 'online' : 'offline'} ${isSelected ? 'active' : ''}" onclick="selectTarget('${escapeHtml(u)}')">
         <div class="user-avatar">
           ${escapeHtml(u.charAt(0).toUpperCase())}
-          <div class="online-badge"></div>
+          <div class="${isOnline ? 'online-badge' : 'offline-badge'}"></div>
         </div>
         <div class="user-info">
-          <div class="user-name">${escapeHtml(u)}</div>
-          <div class="user-meta">${escapeHtml(formatRoomMeta(directMsgs, directFiles.length, 'Chat riêng'))}</div>
+          <div class="user-name-row">
+            <span class="user-status-dot ${isOnline ? 'online' : 'offline'}"></span>
+            <span class="user-name">${escapeHtml(u)}</span>
+          </div>
+          <div class="user-meta">${isOnline ? 'Đang hoạt động' : 'Ngoại tuyến'}${directMsgs || directFiles.length ? ' · ' + escapeHtml(metaText) : ''}</div>
         </div>
         ${activeTransfer ? `<span class="transfer-pill">${activeTransfer.progress ?? 0}%</span>` : ''}
       </div>
     `;
-  });
+  }
+
+  if (onlineOthers.length > 0) {
+    userHtml += `<div class="user-section-label online">Đang hoạt động (${onlineOthers.length})</div>`;
+    userHtml += onlineOthers.map(u => renderMemberItem(u, true)).join('');
+  }
+
+  if (offlineOthers.length > 0) {
+    userHtml += `<div class="user-section-label offline">Ngoại tuyến (${offlineOthers.length})</div>`;
+    userHtml += offlineOthers.map(u => renderMemberItem(u, false)).join('');
+  }
 
   const userListElem = document.getElementById('user-list');
   if (userListElem) userListElem.innerHTML = userHtml;
@@ -397,8 +449,9 @@ function renderState(s) {
   // Sync hidden target dropdown
   const targetSelect = document.getElementById('target');
   if (targetSelect) {
+    const allTargets = [...onlineOthers, ...offlineOthers];
     targetSelect.innerHTML = '<option value="*">Everyone</option>' +
-      otherUsers.map(x => `<option value="${escapeHtml(x)}">${escapeHtml(x)}</option>`).join('');
+      allTargets.map(x => `<option value="${escapeHtml(x)}">${escapeHtml(x)}</option>`).join('');
     targetSelect.value = currentTarget;
   }
 
